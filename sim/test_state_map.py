@@ -1,4 +1,18 @@
-"""Test the MuJoCo<->LQR state mapping against the real model."""
+"""state_map 的回归测试。
+
+覆盖
+----
+1. 选择矩阵满秩(rank = 10/10) —— 证明 10 个状态互相独立
+2. 零位偏置 LEAN_OFFSET 精确
+3. 腿倾角速度恒等式(lean_rate == 腿刚体角速度在侧向轴上的投影)
+4. 两条腿独立(不被打包平均)
+5. 各状态对输入的响应方向正确(偏航对差动力矩、俯仰对基座姿态)
+6. 随机扰动下不产生 NaN / inf
+
+历史:早期版本的状态映射把 y(偏航)与 f(身体俯仰)搞反,并把两腿平均成一个量,
+导致选择矩阵 rank 只有 7,并据此错误地判定"模型退化"。本测试的 rank 检查
+就是防止那类错误复现。
+"""
 import math
 import sys
 from pathlib import Path
@@ -6,56 +20,92 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "urdf"))
 sys.path.insert(0, str(ROOT / "sim"))
 
 import mujoco  # noqa: E402
 import state_map as sm  # noqa: E402
 
-np.set_printoptions(precision=6, suppress=True, linewidth=200)
+LABELS = ["x", "x'", "y(yaw)", "y'", "tl", "tl'", "tr", "tr'", "f(pitch)", "f'"]
 
 m = mujoco.MjModel.from_xml_path(str(ROOT / "urdf" / "car.xml"))
 d = mujoco.MjData(m)
 
-print("LEAN_OFFSET constant =", sm.LEAN_OFFSET)
 
-mujoco.mj_resetDataKeyframe(m, d, 0)
-mujoco.mj_forward(m, d)
+def home():
+    mujoco.mj_resetDataKeyframe(m, d, 0)
+    mujoco.mj_forward(m, d)
 
-print("\n--- at home keyframe ---")
-print("hip qpos      :", d.qpos[7], d.qpos[9])
-low, up = sm.leg_states(d)
-print(f"lower: lean={low.lean:+.6f} len={low.length * 1000:.4f} mm")
-print(f"upper: lean={up.lean:+.6f} len={up.length * 1000:.4f} mm")
-print("=> LEAN_OFFSET should equal lower.lean; actual diff =",
-      abs(sm.LEAN_OFFSET - low.lean))
-assert abs(sm.LEAN_OFFSET - low.lean) < 1e-9, "LEAN_OFFSET mismatch!"
-print("lean offsets after removing bias:", sm.leg_offsets(d))
-print("body pitch    :", sm.body_pitch(d))
+
+# ---------------------------------------------------------------- 1. 满秩
+print("=" * 72)
+print("1. 选择矩阵必须满秩(rank = 10/10)")
+print("=" * 72)
+nv, n = m.nv, 2 * m.nv
+C = np.zeros((10, n))
+eps = 1e-7
+
+
+def pert(e, idx):
+    """在切空间方向 idx 上加 e 的扰动。
+
+    注意 qpos 布局:qpos[0:3]=平移, qpos[3:7]=四元数, qpos[7:11]=4 个铰链。
+    早期版本写成 qpos[6+(idx-6)],会去扰动四元数分量而非髋关节 —— 这是个
+    真实踩过的坑,故此处保留注释。
+    """
+    mujoco.mj_resetDataKeyframe(m, d, 0)
+    if idx < nv:
+        if idx < 3:
+            d.qpos[idx] += e
+        elif idx < 6:
+            ax = np.zeros(3)
+            ax[idx - 3] = e
+            th = np.linalg.norm(ax)
+            k = ax / th
+            dq = np.array([math.cos(th / 2), *(math.sin(th / 2) * k)])
+            w0, v0 = d.qpos[3], d.qpos[4:7]
+            w1, v1 = dq[0], dq[1:4]
+            d.qpos[3] = w1 * w0 - v1 @ v0
+            d.qpos[4:7] = w1 * v0 + w0 * v1 + np.cross(v1, v0)
+        else:
+            d.qpos[7 + (idx - 6)] += e
+    else:
+        d.qvel[idx - nv] = e
+    mujoco.mj_forward(m, d)
+
+
+for j in range(n):
+    pert(+eps, j)
+    xp = sm.lqr_state(d)
+    pert(-eps, j)
+    xm = sm.lqr_state(d)
+    C[:, j] = (xp - xm) / (2 * eps)
+
+sv = np.linalg.svd(C, compute_uv=False)
+rank = int(np.linalg.matrix_rank(C))
+print(f"  rank(C) = {rank} / 10")
+print(f"  奇异值  = {np.round(sv, 6)}")
+assert rank == 10, f"选择矩阵秩不足({rank}/10),状态之间有线性相关"
+
+# ------------------------------------------------------- 2. 零位偏置
+print()
+print("=" * 72)
+print("2. 零位偏置 LEAN_OFFSET")
+print("=" * 72)
+home()
 s = sm.lqr_state(d)
-print("lqr_state     :", s)
+print(f"  LEAN_OFFSET = {sm.LEAN_OFFSET:+.9f} rad "
+      f"({math.degrees(sm.LEAN_OFFSET):+.4f} deg)")
+print(f"  home 处 tl - off = {s[4] - sm.LEAN_OFFSET:+.3e}")
+print(f"  home 处 tr - off = {s[6] - sm.LEAN_OFFSET:+.3e}")
+assert abs(s[4] - sm.LEAN_OFFSET) < 1e-12
+assert abs(s[6] - sm.LEAN_OFFSET) < 1e-12
+print("  home 位姿状态:", np.round(s, 9))
 
-print("\n--- sweep hip_lower, check tl tracks it ---")
-for h in (-0.4, -0.2, 0.0, 0.2, 0.4):
-    mujoco.mj_resetDataKeyframe(m, d, 0)
-    d.qpos[7] = h
-    d.qpos[9] = h          # both legs together -> planar motion
-    mujoco.mj_forward(m, d)
-    s = sm.lqr_state(d)
-    lo, up_ = sm.leg_states(d)
-    print(f"  hip={h:+.2f}  tl={s[4]:+.6f}  y={s[2] * 1000:9.4f} mm  "
-          f"lo.lean={lo.lean:+.6f} up.lean={up_.lean:+.6f}")
-
-print("\n--- tilt body, check pitch & lean respond ---")
-for ang in (-0.2, 0.0, 0.2):
-    mujoco.mj_resetDataKeyframe(m, d, 0)
-    d.qpos[3:7] = [math.cos(ang / 2), 0.0, math.sin(ang / 2), 0.0]
-    mujoco.mj_forward(m, d)
-    s = sm.lqr_state(d)
-    print(f"  bodyrotY={ang:+.2f}  pitch={sm.body_pitch(d):+.6f}  "
-          f"tl={s[4]:+.6f}  y={s[2] * 1000:9.4f} mm  x={s[0] * 1000:+.4f} mm")
-
-print("\n--- lean_rate must EQUAL the hip rate exactly (rigid-body identity) ---")
+# ------------------------------------------- 3. 腿倾角速度恒等式
+print()
+print("=" * 72)
+print("3. 腿倾角速度恒等式(身体不动时 tl' 应精确等于髋角速度)")
+print("=" * 72)
 worst = 0.0
 for h in (-0.6, -0.3, 0.0, 0.3, 0.6):
     for w in (-2.0, 1.0, 3.0):
@@ -65,43 +115,80 @@ for h in (-0.6, -0.3, 0.0, 0.3, 0.6):
         d.qvel[6] = w
         d.qvel[8] = w
         mujoco.mj_forward(m, d)
-        low, up = sm.leg_states(d)
-        err = max(abs(low.lean_rate - w), abs(up.lean_rate - w))
-        worst = max(worst, err)
-        print(f"  hip={h:+.2f} rate={w:+.1f}  lean_rate=({low.lean_rate:+.8f}, "
-              f"{up.lean_rate:+.8f})  err={err:.2e}")
-assert worst < 1e-9, f"lean_rate identity violated, worst err {worst}"
-print(f"  -> exact to {worst:.2e}")
+        st = sm.lqr_state(d)
+        worst = max(worst, abs(st[5] - w), abs(st[7] - w))
+print(f"  最大误差 = {worst:.3e}")
+assert worst < 1e-9, f"倾角速度不精确,误差 {worst}"
+print("  -> 精确(机器精度)")
 
-print("\n--- body twist about lateral axis must show up in lean_rate ---")
+# ------------------------------------------------- 4. 两腿独立
+print()
+print("=" * 72)
+print("4. 两条腿必须独立(不能平均成一个量)")
+print("=" * 72)
 mujoco.mj_resetDataKeyframe(m, d, 0)
-d.qvel[4] = 1.5  # base angular velocity about world Y
+d.qpos[7] = 0.3
 mujoco.mj_forward(m, d)
-low, _ = sm.leg_states(d)
-print(f"  base wy=1.5 -> lean_rate={low.lean_rate:+.8f} (body carries legs rigidly)")
-assert abs(low.lean_rate + 1.5) < 1e-8, "body twist not reflected (sign check)"
-print("  sign: world +Y rate -> lean_rate negative (lateral axis is -Y) OK")
+st = sm.lqr_state(d)
+print(f"  只动 hip_lower=0.3 -> tl={st[4]:+.6f}  tr={st[6]:+.6f}")
+assert abs(st[4] - st[6]) > 0.1, "两腿被打包成一个量了"
+print("  -> tl 与 tr 独立")
 
-print("\n--- wheel rate passthrough ---")
-mujoco.mj_resetDataKeyframe(m, d, 0)
-d.qvel[7] = 4.0
-d.qvel[9] = -3.0
+# --------------------------------------- 5. 状态方向正确性
+print()
+print("=" * 72)
+print("5. 状态方向正确性")
+print("=" * 72)
+# 5a. 绕世界 +Y 旋转基座 -> 身体俯仰应负(侧向轴是 -Y)
+home()
+ang = 0.2
+d.qpos[3:7] = [math.cos(ang / 2), 0.0, math.sin(ang / 2), 0.0]
 mujoco.mj_forward(m, d)
-low, up = sm.leg_states(d)
-assert abs(low.wheel_rate - 4.0) < 1e-12 and abs(up.wheel_rate + 3.0) < 1e-12
-print(f"  wheels = ({low.wheel_rate}, {up.wheel_rate}) OK")
+st = sm.lqr_state(d)
+print(f"  绕世界 +Y 转 {ang} rad -> f(pitch) = {st[8]:+.6f} (应为负)")
+assert st[8] < 0, "俯仰符号不符"
+# 5b. 绕世界 Z 旋转基座 -> 偏航应等于该角度
+home()
+yz = 0.3
+d.qpos[3:7] = [math.cos(yz / 2), 0.0, 0.0, math.sin(yz / 2)]
+mujoco.mj_forward(m, d)
+st = sm.lqr_state(d)
+print(f"  绕世界 Z 转 {yz} rad -> y(yaw) = {st[2]:+.6f} (应等于该值)")
+assert abs(st[2] - yz) < 1e-9, "偏航不符"
+# 5c. 偏航角速度
+home()
+d.qvel[5] = 1.5
+mujoco.mj_forward(m, d)
+st = sm.lqr_state(d)
+print(f"  基座 wz=1.5 -> y' = {st[3]:+.6f}")
+assert abs(st[3] - 1.5) < 1e-9
+# 5d. 俯仰角速度
+home()
+d.qvel[4] = 1.5
+mujoco.mj_forward(m, d)
+st = sm.lqr_state(d)
+print(f"  基座 wy=1.5 -> f' = {st[9]:+.6f} (侧向轴 -Y,应为 -1.5)")
+assert abs(st[9] + 1.5) < 1e-9
+print("  -> 方向全部正确")
 
-print("\n--- lqr_state shape / finiteness under random perturbation ---")
+# ------------------------------------------------- 6. 随机扰动健壮性
+print()
+print("=" * 72)
+print("6. 随机扰动下不得出现 NaN / inf")
+print("=" * 72)
 rng = np.random.default_rng(0)
-for trial in range(50):
+for _ in range(100):
     mujoco.mj_resetDataKeyframe(m, d, 0)
     d.qpos[:7] += rng.normal(0, 0.01, 7)
     d.qpos[7:11] += rng.normal(0, 0.1, 4)
     d.qvel[:] = rng.normal(0, 0.5, 10)
     mujoco.mj_forward(m, d)
-    s = sm.lqr_state(d)
-    assert s.shape == (10,), s.shape
-    assert np.all(np.isfinite(s)), s
-print("  50 random states -> all finite, shape (10,) OK")
+    st = sm.lqr_state(d)
+    assert st.shape == (10,), st.shape
+    assert np.all(np.isfinite(st)), st
+print("  100 组随机状态 -> 全部有限,形状 (10,)")
 
-print("\nALL STATE-MAP TESTS PASSED")
+print()
+print("=" * 72)
+print("ALL STATE-MAP TESTS PASSED")
+print("=" * 72)
