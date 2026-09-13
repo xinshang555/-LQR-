@@ -1,0 +1,35 @@
+# 行尾自动转换:交给下面的规则逐类决定
+* text=auto
+
+# ---------------------------------------------------------------
+# 二进制文件 —— 必须声明为 binary
+#
+# 本机 system 层 core.autocrlf=true,若不声明,checkout 时 git 会把
+# CRLF<->LF 转换套在这些文件上,STL/STEP 会被**静默破坏**:
+# 文件能下载、大小也对,但网格加载失败或几何错乱。
+# 这类损坏在仿真里表现为"模型看起来不对",极难定位到版本控制上。
+# ---------------------------------------------------------------
+*.stl    binary
+*.STL    binary
+*.step   binary
+*.STEP   binary
+*.stp    binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.zip    binary
+*.npz    binary
+*.npy    binary
+
+# ---------------------------------------------------------------
+# 文本文件 —— 统一 LF,避免同一文件在不同机器上全文件 diff
+# ---------------------------------------------------------------
+*.py     text eol=lf
+*.md     text eol=lf
+*.xml    text eol=lf
+*.urdf   text eol=lf
+*.txt    text eol=lf
+*.json   text eol=lf
+*.sh     text eol=lf
+*.gitattributes text eol=lf
+*.gitignore     text eol=lf
