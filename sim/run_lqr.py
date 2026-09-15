@@ -11,7 +11,7 @@
 
 控制律
 ------
-    u = -K @ x_lqr
+    ctrl = u_eq - K @ (x_lqr - x_ref)
 
 其中 x_lqr 由 `state_map.lqr_state()` 从 MuJoCo 状态映射而来(见该文件的长注释,
 说明为什么不能把 qpos 直接塞进 K)。
@@ -20,7 +20,7 @@
 它们必须同相。若不加这一项,两腿会各自漂移,机身开始绕竖轴扭,平面假设失效。
 同步项把「两腿虚拟腿角之差」拉回 0。
 
-输出的 u 是 4 维,顺序与 car.xml 的 actuator 一致:
+输出 ctrl 是 4 维归一化电机命令,顺序与 car.xml 的 actuator 一致:
     [hip_lower, wheel_lower, hip_upper, wheel_upper]
 """
 
@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -39,64 +40,51 @@ sys.path.insert(0, str(ROOT / "LQR计算代码"))
 
 import mujoco  # noqa: E402
 
-import calculate as lqr_calc  # noqa: E402
-import parameter as P  # noqa: E402
 import state_map as sm  # noqa: E402
 
 XML = ROOT / "urdf" / "car.xml"
+GAIN = ROOT / "sim" / "lqr_gain.npz"
 
 # actuator 顺序(见 car.xml)
 ACT_HIP_LOWER, ACT_WHEEL_LOWER, ACT_HIP_UPPER, ACT_WHEEL_UPPER = 0, 1, 2, 3
 
 
-def build_controller(leg_nominal: float = None, verbose: bool = True):
-    """解出 K 并返回一个 (data) -> ctrl 的闭包。"""
-    L = P.LEG_NOMINAL if leg_nominal is None else leg_nominal
-    K = lqr_calc.calculate(L, L)
+def build_controller(m, gain_path: Path = GAIN, verbose: bool = True):
+    """加载 design_gain.py 生成的离散 LQR，并返回控制闭包。"""
+    if not gain_path.exists():
+        raise FileNotFoundError(
+            f"未找到 {gain_path}；请先运行 python3 sim/design_gain.py")
+    with np.load(gain_path) as gain:
+        K = gain["K"].copy()
+        reference = gain["reference"].copy()
+        u_eq = gain["u_eq"].copy()
+        control_every = int(gain["control_every"])
+        armature = float(gain["wheel_armature"])
+        rho = float(gain["spectral_radius"])
+        rank = int(gain["controllability_rank"])
+    for name in ("wheel_lower_joint", "wheel_upper_joint"):
+        jid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, name)
+        m.dof_armature[m.jnt_dofadr[jid]] = armature
     if verbose:
-        print(f"[LQR] 腿长 {L * 1000:.1f} mm, K 形状 {K.shape}, "
-              f"max|K|={np.max(np.abs(K)):.3f}, 全部有限={np.all(np.isfinite(K))}")
+        print(f"[LQR] K={K.shape}, controllability={rank}/10, "
+              f"rho={rho:.6f}, max|K|={np.max(np.abs(K)):.3f}")
 
     def controller(m, d) -> np.ndarray:
-        x = sm.lqr_state(d)
-        # 高度项与腿角项本来就有零位偏置:减去标称值,使平衡点对应 0 误差
-        x[2] -= L * math.cos(sm.LEAN_OFFSET)   # 标称竖直投影长度
-        x[4] -= sm.LEAN_OFFSET
-        x[6] -= sm.LEAN_OFFSET
+        return u_eq - K @ (sm.lqr_state(d) - reference)
 
-        u_planar = -K @ x
-
-        # --- 腿同步项 ---
-        # 两腿虚拟腿角之差与其变化率,单独用一个 PD 拉回 0。
-        low, up = sm.leg_states(d)
-        d_lean = low.lean - up.lean
-        d_rate = low.lean_rate - up.lean_rate
-        kp_sync, kd_sync = 2.0e-1, 2.0e-2
-        u_sync = kp_sync * d_lean + kd_sync * d_rate
-
-        ctrl = np.zeros(4)
-        # K 的 4 个输入顺序是 [Tlw, Tll, Trw, Trl](左轮, 左腿, 右轮, 右腿)
-        # 映射到 actuator:[hip_lower, wheel_lower, hip_upper, wheel_upper]
-        #
-        # "lower" 与 "upper" 两条腿在 X-Z 面内做**同向**运动(它们并排,
-        # 机身带动它们一起前后倾),所以平面律对两条腿给**相同**的腿角指令;
-        # 差别只在同步项上(反号)。
-        ctrl[ACT_WHEEL_LOWER] = u_planar[0]          # Tlw
-        ctrl[ACT_HIP_LOWER] = u_planar[1] + u_sync   # Tll
-        ctrl[ACT_WHEEL_UPPER] = u_planar[2]          # Trw
-        ctrl[ACT_HIP_UPPER] = u_planar[3] - u_sync   # Trl
-        return ctrl
-
-    return controller, K
+    return controller, K, control_every
 
 
 def run(seconds: float, view: bool, open_loop: bool, kick: float,
-        leg_nominal: float = None, plot: bool = False,
+        gain_path: Path = GAIN, plot: bool = False,
         track_x: float = 0.0) -> dict:
     m = mujoco.MjModel.from_xml_path(str(XML))
     d = mujoco.MjData(m)
 
-    controller, K = build_controller(leg_nominal, verbose=not open_loop)
+    if open_loop:
+        controller, K, control_every = None, np.zeros((4, 10)), 10
+    else:
+        controller, K, control_every = build_controller(m, gain_path, verbose=True)
 
     # 从 home 关键帧出发(轮子正好贴地、机身竖直)
     mujoco.mj_resetDataKeyframe(m, d, 0)
@@ -111,10 +99,10 @@ def run(seconds: float, view: bool, open_loop: bool, kick: float,
 
     dt = m.opt.timestep
     n_steps = int(round(seconds / dt))
-    # 控制频率:每 10 个物理步下一次控制 -> 100 Hz 控制、0.5 ms 物理
-    control_every = 10
+    # 默认每 10 个 0.5 ms 物理步更新一次，即 200 Hz。
 
     viewer = None
+    wall_start = None
     if view:
         try:
             # 注意:必须用 importlib 取 viewer 子模块,
@@ -123,14 +111,16 @@ def run(seconds: float, view: bool, open_loop: bool, kick: float,
             import importlib
             mujoco_viewer = importlib.import_module("mujoco.viewer")
             viewer = mujoco_viewer.launch_passive(m, d)
+            wall_start = time.perf_counter()
         except Exception as exc:  # noqa: BLE001
             print(f"[warn] 无法打开查看器({type(exc).__name__}: {exc}),改为无窗口运行")
             viewer = None
 
-    log_t, log_pitch, log_x, log_y, log_lean, log_ctrl = [], [], [], [], [], []
+    log_t, log_pitch, log_x, log_y, log_z, log_lean, log_ctrl = [], [], [], [], [], [], []
     ctrl = np.zeros(4)
     fell_at = None
     pitch0 = sm.body_pitch(d)
+    home_z = float(d.qpos[2])
 
     for step in range(n_steps):
         t = step * dt
@@ -149,6 +139,12 @@ def run(seconds: float, view: bool, open_loop: bool, kick: float,
             if not viewer.is_running():
                 break
             viewer.sync()
+            # launch_passive() 不负责给外部仿真循环限速。没有这段时，
+            # 0.5 ms 的物理步会尽可能快地运行，画面可达到约 10 倍实时速度。
+            target_wall = wall_start + (step + 1) * dt
+            remaining = target_wall - time.perf_counter()
+            if remaining > 0:
+                time.sleep(remaining)
 
         if step % 50 == 0:   # 每 25 ms 记一次
             pit = sm.body_pitch(d)
@@ -157,12 +153,15 @@ def run(seconds: float, view: bool, open_loop: bool, kick: float,
             log_pitch.append(math.degrees(pit))
             log_x.append(float(d.qpos[0]) * 1000)
             log_y.append(float(st[2]) * 1000)
+            log_z.append(float(d.qpos[2]) * 1000)
             log_lean.append(math.degrees(st[4]))
             log_ctrl.append(ctrl.copy())
 
-            # 判定"倒下":机身倾角超过 60 度,或机身高度掉到 15 mm 以下
-            if fell_at is None and (abs(pit) > math.radians(60.0)
-                                    or float(d.qpos[2]) < 0.015):
+            # 可信的站立判据：姿态、高度、位置都必须有界。
+            if fell_at is None and (not np.isfinite(d.qpos).all()
+                                    or abs(pit) > math.radians(5.0)
+                                    or abs(float(d.qpos[2]) - home_z) > 0.005
+                                    or abs(float(d.qpos[0])) > 0.050):
                 fell_at = t
 
     if viewer is not None:
@@ -172,6 +171,7 @@ def run(seconds: float, view: bool, open_loop: bool, kick: float,
     log_pitch = np.array(log_pitch)
     log_x = np.array(log_x)
     log_y = np.array(log_y)
+    log_z = np.array(log_z)
     log_lean = np.array(log_lean)
     log_ctrl = np.array(log_ctrl) if log_ctrl else np.zeros((0, 4))
 
@@ -187,8 +187,9 @@ def run(seconds: float, view: bool, open_loop: bool, kick: float,
         "final_pitch_deg": final_pitch,
         "steady_pitch_max_deg": steady_pitch_max,
         "x_drift_mm": steady_x_drift,
+        "max_height_error_mm": float(np.max(np.abs(log_z - home_z * 1000))),
         "t": log_t, "pitch": log_pitch, "x": log_x, "y": log_y,
-        "lean": log_lean, "ctrl": log_ctrl,
+        "z": log_z, "lean": log_lean, "ctrl": log_ctrl,
     }
 
     print()
@@ -198,6 +199,7 @@ def run(seconds: float, view: bool, open_loop: bool, kick: float,
     print(f"  最终倾角              : {final_pitch:+.4f} deg")
     print(f"  稳态段最大倾角        : {steady_pitch_max:.4f} deg")
     print(f"  前后漂移              : {steady_x_drift:.4f} mm")
+    print(f"  最大高度误差          : {result['max_height_error_mm']:.4f} mm")
     if fell_at is None:
         print("  结果                  : 站住了(全程未触发倒下判据)")
     else:
@@ -217,33 +219,33 @@ def make_plot(result: dict, open_loop: bool) -> None:
 
     t = result["t"]
     fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
-    axes[0].plot(t, result["pitch"], label="机身俯仰角 (deg)")
+    axes[0].plot(t, result["pitch"], label="body pitch (deg)")
     axes[0].axhline(0, color="k", lw=0.5)
     axes[0].set_ylabel("pitch [deg]")
     axes[0].legend()
     axes[0].grid(alpha=0.3)
 
-    axes[1].plot(t, result["x"], color="C1", label="前后位置 (mm)")
+    axes[1].plot(t, result["x"], color="C1", label="forward position (mm)")
     axes[1].axhline(0, color="k", lw=0.5)
     axes[1].set_ylabel("x [mm]")
     axes[1].legend()
     axes[1].grid(alpha=0.3)
 
-    axes[2].plot(t, result["y"], color="C2", label="腿竖直投影 (mm)")
-    axes[2].set_ylabel("leg height [mm]")
+    axes[2].plot(t, result["y"], color="C2", label="yaw (mrad)")
+    axes[2].set_ylabel("yaw [mrad]")
     axes[2].legend()
     axes[2].grid(alpha=0.3)
 
-    axes[3].plot(t, result["lean"], color="C3", label="虚拟腿角 (deg)")
+    axes[3].plot(t, result["lean"], color="C3", label="virtual leg angle (deg)")
     axes[3].axhline(math.degrees(sm.LEAN_OFFSET), color="r", ls="--", lw=0.8,
-                    label="零位偏置")
+                    label="home offset")
     axes[3].set_ylabel("lean [deg]")
     axes[3].set_xlabel("t [s]")
     axes[3].legend()
     axes[3].grid(alpha=0.3)
 
     tag = "openloop" if open_loop else "lqr"
-    fig.suptitle(f"car.xml 平衡仿真 ({'开环' if open_loop else 'LQR 闭环'})")
+    fig.suptitle(f"car.xml balance ({'open loop' if open_loop else 'LQR closed loop'})")
     fig.tight_layout()
     out = ROOT / "sim" / f"result_{tag}.png"
     fig.savefig(out, dpi=110)
@@ -257,9 +259,11 @@ def main() -> int:
     ap.add_argument("--open-loop", action="store_true", help="开环对照(ctrl=0)")
     ap.add_argument("--kick", type=float, default=0.0, help="初始倾角扰动 (rad)")
     ap.add_argument("--plot", action="store_true", help="保存曲线 PNG")
+    ap.add_argument("--gain", type=Path, default=GAIN, help="design_gain.py 生成的 npz")
     args = ap.parse_args()
 
-    run(args.seconds, args.view, args.open_loop, args.kick, plot=args.plot)
+    run(args.seconds, args.view, args.open_loop, args.kick,
+        gain_path=args.gain, plot=args.plot)
     return 0
 
 
