@@ -22,6 +22,7 @@ class MujocoInterface {
   void writeTorque(const MotorCommand& command);
   void step();
   void resetHome();
+  void applyPitchKick(double angle_rad);
 
   double timestep() const;
   double simulationTime() const;

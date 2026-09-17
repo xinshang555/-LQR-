@@ -23,6 +23,7 @@ class WheelLegController {
 
   UserCommand command_{};
   std::array<double, 10> reference_{};
+  std::array<double, 4> previous_torque_nm_{};
 };
 
 }  // namespace wheel_leg

@@ -10,6 +10,9 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kMotorGearNm = 0.004473;
 constexpr double kMaxSpeed = 0.04;
 constexpr double kHeadingErrorLimit = 0.2 * kPi / 180.0;
+// Limits abrupt current/torque changes that otherwise excite the very light
+// legs and hard joint stops. Full-scale torque takes about 30 ms to ramp.
+constexpr double kMaxTorqueRateNmPerSecond = 0.15;
 
 constexpr std::array<std::array<double, 10>, 4> kGain{{
     {{-6.57524291422409, -0.7414274080687234, 12.881908785099638,
@@ -75,7 +78,12 @@ MotorCommand WheelLegController::update(const RobotState& state, double dt) {
       normalized -= kGain[motor][state_index] * error[state_index];
     }
     normalized = std::clamp(normalized, -1.0, 1.0);
-    output.torque_nm[motor] = normalized * kMotorGearNm;
+    const double requested_torque = normalized * kMotorGearNm;
+    const double max_change = kMaxTorqueRateNmPerSecond * std::max(dt, 0.0);
+    output.torque_nm[motor] = std::clamp(
+        requested_torque, previous_torque_nm_[motor] - max_change,
+        previous_torque_nm_[motor] + max_change);
+    previous_torque_nm_[motor] = output.torque_nm[motor];
   }
   return output;
 }
@@ -106,6 +114,9 @@ void WheelLegController::stopAndHold(const RobotState& state) {
 void WheelLegController::reset() {
   reference_ = kReference;
   command_ = {};
+  for (std::size_t motor = 0; motor < previous_torque_nm_.size(); ++motor) {
+    previous_torque_nm_[motor] = kEquilibriumControl[motor] * kMotorGearNm;
+  }
 }
 
 }  // namespace wheel_leg

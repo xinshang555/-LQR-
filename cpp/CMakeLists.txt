@@ -98,3 +98,7 @@ add_test(NAME cpp_turn
   COMMAND wheel_leg_sim --headless --seconds 12 --target-yaw 2)
 set_tests_properties(cpp_turn PROPERTIES
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME cpp_disturbance
+  COMMAND wheel_leg_sim --headless --seconds 5 --kick-deg 2)
+set_tests_properties(cpp_disturbance PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")

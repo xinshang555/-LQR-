@@ -24,9 +24,13 @@ CMake 会自动寻找 Python `mujoco` 包中的头文件和动态库，也可以
 键盘：`W/S` 调速、`A/D` 调航向、`Space/X` 停止保持、`R` 复位、`Esc` 退出。
 鼠标左键旋转视角、右键平移、中键或滚轮缩放。
 
+为适应仅 25.53 g 的小车，控制器包含扭矩变化率限制和跌倒断电保护；CAD 网格
+只负责显示，机身与腿使用稳定的 box/capsule 碰撞体。安全保护触发后按 `R` 复位。
+
 无窗口运行示例：
 
 ```bash
 ./cpp/build/wheel_leg_sim --headless --seconds 5 --vx 0.02
 ./cpp/build/wheel_leg_sim --headless --seconds 20 --target-yaw 5
+./cpp/build/wheel_leg_sim --headless --seconds 5 --kick-deg 2
 ```

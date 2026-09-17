@@ -118,6 +118,15 @@ void MujocoInterface::resetHome() {
   mj_forward(model_.get(), data_.get());
 }
 
+void MujocoInterface::applyPitchKick(double angle_rad) {
+  const double half = 0.5 * angle_rad;
+  data_->qpos[3] = std::cos(half);
+  data_->qpos[4] = 0.0;
+  data_->qpos[5] = -std::sin(half);
+  data_->qpos[6] = 0.0;
+  mj_forward(model_.get(), data_.get());
+}
+
 double MujocoInterface::timestep() const { return model_->opt.timestep; }
 
 double MujocoInterface::simulationTime() const { return data_->time; }

@@ -1,7 +1,8 @@
 <mujoco model="car_wheel_leg">
   <!--
-    Generated from car_zup.urdf by urdf/tools/make_mjcf.py -- do not hand-edit.
-    Re-run:  cd urdf/tools && ./run.sh make_mjcf.py
+    Originally generated from car_zup.urdf by urdf/tools/make_mjcf.py.
+    This file now also contains hand-maintained primitive collision hulls and
+    damping for robust control; re-generation must preserve those additions.
 
     Source of truth: model/car.STEP (geometry) + 质量属性/*.txt (mass).
     Verified against the URDF: mass matrix identical to 1e-15.
@@ -36,9 +37,6 @@
   <default>
     <geom friction="1.0 0.005 0.0001" condim="3" contype="1" conaffinity="1"
           solref="0.002 1" solimp="0.99 0.999 0.001"/>
-    <!-- no joint damping: the wheels must spin freely for balance control.
-         solreflimit makes the hip end-stops stiff mechanical limits rather
-         than soft springs, so the leg cannot be driven past +-0.8 rad. -->
     <joint damping="0" frictionloss="0" armature="0"
            solreflimit="0.002 1" solimplimit="0.99 0.999 0.001"/>
   </default>
@@ -70,11 +68,17 @@
     <body name="mount">
       <inertial mass="0.02153" pos="-0.01114 -0.0175 0.0017" quat="0 0.6339704437 0 0.7733572761" diaginertia="3.96522462e-06 3.60349e-06 2.01577538e-06"/>
       <joint name="world_to_mount" type="free"/>
-      <geom name="<mjtObj.mjOBJ_GEOM:0>" type="mesh" mesh="body_local" quat="0.7071067812 0.7071067812 0 0" rgba="0.70 0.70 0.73 1"/>
+      <geom name="<mjtObj.mjOBJ_GEOM:0>" type="mesh" mesh="body_local" quat="0.7071067812 0.7071067812 0 0" rgba="0.70 0.70 0.73 1" contype="0" conaffinity="0"/>
+      <geom name="mount_collision" type="box"
+            pos="-0.01114 -0.0175 0.0017" size="0.012 0.016 0.020"
+            solref="0.008 1" solimp="0.90 0.98 0.003" rgba="0 0 0 0"/>
       <body name="leg_lower" pos="-0.009397509 -2.400093457e-19 -0.001080906" quat="0.7071067812 0.7071067812 0 0">
         <inertial mass="0.00114" pos="-0.000812491 -0.018049094 0.00175" quat="0.4885952921 0.5111503111 -0.4885952921 0.5111503111" diaginertia="1.6738e-07 1.613210456e-07 8.388954431e-09"/>
-        <joint name="hip_lower_joint" type="hinge" axis="0 0 1" range="-0.8 0.8"/>
-        <geom name="<mjtObj.mjOBJ_GEOM:1>" type="mesh" mesh="leg_lower_local" rgba="0.70 0.70 0.73 1"/>
+        <joint name="hip_lower_joint" type="hinge" axis="0 0 1" range="-0.8 0.8" damping="5e-7"/>
+        <geom name="<mjtObj.mjOBJ_GEOM:1>" type="mesh" mesh="leg_lower_local" rgba="0.70 0.70 0.73 1" contype="0" conaffinity="0"/>
+        <geom name="leg_lower_collision" type="capsule"
+              fromto="0 0 0 -0.00180456 -0.039959274 0" size="0.002"
+              solref="0.008 1" solimp="0.90 0.98 0.003" rgba="0 0 0 0"/>
         <body name="wheel_lower" pos="-0.00180456 -0.039959274 0">
           <inertial mass="0.00086" pos="2.069e-06 1.8e-07 -0.00326" quat="0.5 0.5 -0.5 0.5" diaginertia="2.592e-08 1.474e-08 1.474e-08"/>
           <joint name="wheel_lower_joint" type="hinge" axis="0 0 1"/>
@@ -84,8 +88,11 @@
       </body>
       <body name="leg_upper" pos="-0.009397509 -0.0315 -0.001080906" quat="0.7071067812 0.7071067812 0 0">
         <inertial mass="0.00114" pos="-0.000812491 -0.018049094 0.00175" quat="0.4885952921 0.5111503111 -0.4885952921 0.5111503111" diaginertia="1.6738e-07 1.613210456e-07 8.388954431e-09"/>
-        <joint name="hip_upper_joint" type="hinge" axis="0 0 1" range="-0.8 0.8"/>
-        <geom name="<mjtObj.mjOBJ_GEOM:3>" type="mesh" mesh="leg_upper_local" rgba="0.70 0.70 0.73 1"/>
+        <joint name="hip_upper_joint" type="hinge" axis="0 0 1" range="-0.8 0.8" damping="5e-7"/>
+        <geom name="<mjtObj.mjOBJ_GEOM:3>" type="mesh" mesh="leg_upper_local" rgba="0.70 0.70 0.73 1" contype="0" conaffinity="0"/>
+        <geom name="leg_upper_collision" type="capsule"
+              fromto="0 0 0 -0.00180456 -0.039959274 0" size="0.002"
+              solref="0.008 1" solimp="0.90 0.98 0.003" rgba="0 0 0 0"/>
         <body name="wheel_upper" pos="-0.00180456 -0.039959274 0.0035">
           <inertial mass="0.00086" pos="2.069e-06 1.8e-07 0.00326" quat="0.5 0.5 -0.5 0.5" diaginertia="2.592e-08 1.474e-08 1.474e-08"/>
           <joint name="wheel_upper_joint" type="hinge" axis="0 0 1"/>

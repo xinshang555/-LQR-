@@ -26,6 +26,7 @@ struct Options {
   double seconds = 30.0;
   double speed = 0.0;
   double heading = 0.0;
+  double kick = 0.0;
   bool headless = false;
 };
 
@@ -54,10 +55,11 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--seconds") options.seconds = std::stod(value("--seconds"));
     else if (arg == "--vx") options.speed = std::stod(value("--vx"));
     else if (arg == "--target-yaw") options.heading = std::stod(value("--target-yaw")) * kPi / 180.0;
+    else if (arg == "--kick-deg") options.kick = std::stod(value("--kick-deg")) * kPi / 180.0;
     else if (arg == "--headless") options.headless = true;
     else if (arg == "--help" || arg == "-h") {
       std::cout << "Usage: wheel_leg_sim [--model FILE] [--seconds N] [--headless]"
-                   " [--vx MPS] [--target-yaw DEG]\n"
+                   " [--vx MPS] [--target-yaw DEG] [--kick-deg DEG]\n"
                    "Keys: W/S speed, A/D heading, Space/X stop, R reset\n";
       std::exit(0);
     } else {
@@ -75,7 +77,9 @@ void printCommand(const App& app) {
 }
 
 void keyCallback(GLFWwindow* window, int key, int, int action, int) {
-  if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
+  // One physical key press means one command increment. Ignoring GLFW_REPEAT
+  // prevents a short hold from silently requesting maximum speed/heading.
+  if (action != GLFW_PRESS) return;
   auto* app = static_cast<App*>(glfwGetWindowUserPointer(window));
   if (!app) return;
   if (key == GLFW_KEY_W) app->controller->changeForwardSpeed(kSpeedStep);
@@ -132,6 +136,7 @@ int main(int argc, char** argv) {
     wheel_leg::MujocoInterface simulation(options.model_path);
     wheel_leg::WheelLegController controller;
     controller.setCommand({options.speed, options.heading});
+    if (options.kick != 0.0) simulation.applyPitchKick(options.kick);
 
     GLFWwindow* window = nullptr;
     mjvCamera camera;
@@ -162,6 +167,7 @@ int main(int argc, char** argv) {
 
     const double home_height = simulation.readState().body_height;
     bool fell = false;
+    bool safety_latched = false;
     double max_pitch = 0.0;
     double max_height_error = 0.0;
     int step_count = 0;
@@ -172,14 +178,19 @@ int main(int argc, char** argv) {
       if (app.reset_requested) {
         simulation.resetHome();
         controller.reset();
+        safety_latched = false;
         app.reset_requested = false;
         step_count = 0;
         std::cout << "[command] reset to home\n";
       }
       if (step_count % kControlEvery == 0) {
         const auto state = simulation.readState();
-        simulation.writeTorque(controller.update(
-            state, simulation.timestep() * kControlEvery));
+        if (safety_latched) {
+          simulation.writeTorque({});
+        } else {
+          simulation.writeTorque(controller.update(
+              state, simulation.timestep() * kControlEvery));
+        }
       }
       simulation.step();
       ++step_count;
@@ -192,6 +203,14 @@ int main(int argc, char** argv) {
           std::abs(state.body_pitch) > 5.0 * kPi / 180.0 ||
           std::abs(state.body_height - home_height) > 0.005) {
         fell = true;
+      }
+      if (!safety_latched &&
+          (!std::isfinite(state.body_pitch) ||
+           std::abs(state.body_pitch) > 12.0 * kPi / 180.0 ||
+           std::abs(state.body_height - home_height) > 0.010)) {
+        safety_latched = true;
+        simulation.writeTorque({});
+        std::cout << "[safety] fall detected; motors disabled, press R to reset\n";
       }
 
       if (window && step_count % 20 == 0) {
